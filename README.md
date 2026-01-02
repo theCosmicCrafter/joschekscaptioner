@@ -1,78 +1,63 @@
 # Joschek's Captioner
 
-![Batch Captioning](batch2.jpg)
-
- vibe coded image dataset caption tool, that does exactly what i personally need. If it works for you, that's a happy accident.
+A modern, local AI captioning tool for image datasets. Optimized for Qwen-VL and other multimodal models via llama.cpp.
 
 ## Features
-- **Model Selector**: Because we all know your file organization is a mess. Point it to wherever you hid your vision models this time.
-- **Batch Captioning**: Queue up folders to caption while you go contemplate what you are doing.
-- **Cropping**: Uses YOLOv8 to find people and crop them. It sometimes works.
-- **Caption Editor**: A groundbreaking text box to fix the AI's hallucinations. With filter function.
-- **Problem Bin**: One-click functionality to yeet problematic pairs into a separate folder so you can deal with them "later" (never).
 
-## Installation
+*   **Batch Captioning:** Process entire folders of images with customizable prompts.
+*   **Manual Editor:** Review and edit captions with a clean, grid-based UI.
+*   **Auto-Expand Editing:** Edit long captions comfortably with inline expansion.
+*   **Smart Cropping:** Automatically crop images to human subjects using YOLO.
+*   **Filtering:** Move image/caption pairs based on keyword matches.
+*   **Hardware Control:** Manage context size, GPU layers, and VRAM usage directly.
 
-You need Python 3.10+ and an NVIDIA GPU.
+## Installation (Zipped Release)
 
-### Arch / Manjaro (btw)
-```bash
-sudo pacman -Syu python-tk zenity nvidia-utils git
-git clone https://github.com/realjoschek/joschekscaptioner.git
-cd joschekscaptioner
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
+1.  **Extract the Zip:**
+    Unzip the downloaded archive to a folder of your choice.
 
-### Debian / Ubuntu / Mint
-```bash
-sudo apt update && sudo apt install -y python3-tk zenity git
-git clone https://github.com/realjoschek/joschekscaptioner.git
-cd joschekscaptioner
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
+2.  **Install Python:**
+    Ensure you have Python 3.10 or newer installed.
 
-### Windows (I'm sorry)
-1. Install Python 3.10+ (Add to PATH, don't ask why).
-2. Install Git.
-3. Paste this into PowerShell and pray:
-   ```powershell
-   git clone https://github.com/realjoschek/joschekscaptioner.git
-   cd joschekscaptioner
-   python -m venv venv
-   .\venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
+3.  **Setup Environment (Recommended):**
+    Open a terminal in the extracted folder and run:
 
-### Setup llama-server
-You need `llama-server` from [llama.cpp](https://github.com/ggerganov/llama.cpp)
-1. **Get the binary**: Put `llama-server` (or `.exe`) in root or `./build/bin/`.
-2. **Get a model**:
-   - Recommended: [Qwen3-VL-8B-Abliterated-Caption-it](https://huggingface.co/prithivMLmods/Qwen3-VL-8B-Abliterated-Caption-it). If you are planning on captioning naughty stuff.
-   - Alternative: Qwen VL 3 - standart. better sometimes.
-   - Don't forget the mmproj file.
+    ```bash
+    # Create virtual environment
+    python3 -m venv venv
+
+    # Activate it (Linux/Mac)
+    source venv/bin/activate
+
+    # Activate it (Windows)
+    venv\Scripts\activate
+    ```
+
+4.  **Install Dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+    *Note: For GPU acceleration with YOLO (auto-crop), ensure you install the CUDA-enabled version of PyTorch if on Windows/NVIDIA.*
+
+5.  **Get `llama-server`:**
+    Download the latest `llama-server` binary from the [llama.cpp releases](https://github.com/ggerganov/llama.cpp/releases) and place it in the folder (or point to it in the app settings).
 
 ## Usage
 
-**Linux:**
+Run the application:
 ```bash
-source venv/bin/activate
 python joschekscaptions.py
 ```
 
-**Windows:**
-```powershell
-.\venv\Scripts\activate
-python joschekscaptions.py
-```
+### Quick Start
+1.  **Server Tab:** Select your `llama-server` binary and your model/projector `.gguf` files. Set Context to **16384+** for images. Click **Start Server**.
+2.  **Batch Captioning:** Add a folder of images, type a prompt (or use default), and click **Start Processing**.
+3.  **Manual Edit:** Load your folder to review captions. Use the **▼ Expand** button to edit long text.
 
-1. **Server Tab**: Pick your binary and model. Hit start. There's a "Kill GPU processes" button for when things go south.
-2. **Batch Tab**: Point it at images. Wait.
-3. **Editor Tab**: Fix the captions.
-4. **Crop Humans**: Automagical cropping.
+## Requirements
+*   Python 3.10+
+*   `llama-server` (from llama.cpp)
+*   A multimodal model (e.g., Qwen-VL-Chat) in GGUF format.
 
 ## License
-GPL
+MIT

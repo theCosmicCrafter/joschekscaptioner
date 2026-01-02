@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Joschek’s Captioner  v22
+Joschek’s Captioner
 """
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext, filedialog
@@ -28,9 +28,10 @@ except ImportError:
 # ---------------- CONFIG ----------------
 CONFIG_FILE = Path.home() / ".config" / "joschek_captioner.json"
 DEFAULT_PORT = "11434"
-DEFAULT_CTX  = "8192"
+DEFAULT_CTX  = "16384"
 DEFAULT_BATCH= "512"
-DEFAULT_GPU  = "99"
+DEFAULT_GPU  = "33"
+DEFAULT_TOKENS = "1024"
 API_URL      = f"http://localhost:{DEFAULT_PORT}/v1"
 DEFAULT_PROMPT = "Describe this image in detail for an AI training dataset. Focus on clothing, background, textures, and lighting."
 TARGETS = [768, 1024, 1536, 2048]
@@ -53,6 +54,44 @@ ORANGE = "#ff79c6"          # Orange accent
 HOVER = "#3d424e"           # Hover state color
 
 # ---------------- UTILS ----------------
+class ToolTip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip_window = None
+        self.after_id = None
+        widget.bind("<Enter>", self.on_enter)
+        widget.bind("<Leave>", self.on_leave)
+
+    def on_enter(self, event=None):
+        self.after_id = self.widget.after(500, self.show_tip)
+
+    def on_leave(self, event=None):
+        if self.after_id:
+            self.widget.after_cancel(self.after_id)
+            self.after_id = None
+        self.hide_tip()
+
+    def show_tip(self):
+        if not self.text:
+            return
+        # Get mouse coordinates and add offset to avoid overlap/flicker
+        x = self.widget.winfo_pointerx() + 15
+        y = self.widget.winfo_pointery() + 15
+        self.tip_window = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(tw, text=self.text, justify="left",
+                         background="#ffffe0", relief="solid", borderwidth=1,
+                         font=("Sans", "8", "normal"), padx=4, pady=2)
+        label.pack(ipadx=1)
+
+    def hide_tip(self):
+        tw = self.tip_window
+        self.tip_window = None
+        if tw:
+            tw.destroy()
+
 class Config:
     def __init__(self):
         self.config_dir = CONFIG_FILE.parent
@@ -71,7 +110,9 @@ class Config:
             "port": DEFAULT_PORT,
             "context": DEFAULT_CTX,
             "gpu_layers": DEFAULT_GPU,
-            "last_prompt": DEFAULT_PROMPT
+            "max_tokens": DEFAULT_TOKENS,
+            "last_prompt": DEFAULT_PROMPT,
+            "last_dir": str(Path.home())
         }
     def save(self):
         try:
@@ -107,7 +148,7 @@ class QueueItem(tk.Frame):
         close.bind("<Enter>", lambda e: close.config(fg=RED))
         close.bind("<Leave>", lambda e: close.config(fg=DIM))
         tk.Label(main, text=str(self.folder_path), bg=CARD, fg=DIM, font=("Sans", 7), anchor="w").pack(fill="x", pady=(0, 8))
-        self.prompt = tk.Text(main, height=2, bg=INPUT, fg=TEXT, bd=0, relief="flat",
+        self.prompt = tk.Text(main, height=3, bg=INPUT, fg=TEXT, bd=0, relief="flat",
                               highlightthickness=0, font=("Sans", 8), insertbackground=BLUE, wrap="word")
         self.prompt.insert("1.0", config.get("last_prompt", DEFAULT_PROMPT))
         self.prompt.bind("<KeyRelease>", lambda e: config.set("last_prompt", self.get_prompt()))
@@ -287,6 +328,19 @@ class App:
         self.editor_items = []
         self.thumb_size = 200 # Fixed height for editor images
         self.thumb_cache = {}
+        self.is_loading_more = False
+        self.all_filtered_paths = []
+        self.loaded_count = 0
+        
+        # Load Tooltips
+        self.tooltips = {}
+        try:
+            tt_file = Path(__file__).parent / "tooltips.json"
+            if tt_file.exists():
+                self.tooltips = json.loads(tt_file.read_text())
+        except Exception as e:
+            print("Error loading tooltips:", e)
+            
         # Create modern custom tab system
         self.create_modern_tab_system()
         self.build_server()
@@ -302,8 +356,8 @@ class App:
         s.theme_use("clam")
 
         # Modern progress bar
-        s.configure("TProgressbar", background=BLUE, troughcolor=BG, borderwidth=0, thickness=6)
-        s.configure("Horizontal.TProgressbar", background=BLUE, troughcolor=BG, borderwidth=0, thickness=6)
+        s.configure("TProgressbar", background=BLUE, troughcolor=BG, borderwidth=1, bordercolor=CARD, thickness=8, lightcolor=CARD, darkcolor=CARD)
+        s.configure("Horizontal.TProgressbar", background=BLUE, troughcolor=BG, borderwidth=1, bordercolor=CARD, thickness=8, lightcolor=CARD, darkcolor=CARD)
 
         # Modern subtle scrollbar - wider for better accessibility
         s.configure("Vertical.TScrollbar", background=BG, troughcolor=BG, borderwidth=0, arrowsize=0, width=30)
@@ -402,24 +456,37 @@ class App:
         self.port = tk.StringVar(value=self.config.get("port", DEFAULT_PORT))
         self.ctx  = tk.StringVar(value=self.config.get("context", DEFAULT_CTX))
         self.gpu  = tk.StringVar(value=self.config.get("gpu_layers", DEFAULT_GPU))
+        self.max_tokens = tk.StringVar(value=self.config.get("max_tokens", DEFAULT_TOKENS))
+        
         for var, key in [(self.bin, "server_binary"), (self.model, "model_file"),
                          (self.proj, "projector_file"), (self.port, "port"),
-                         (self.ctx, "context"), (self.gpu, "gpu_layers")]:
+                         (self.ctx, "context"), (self.gpu, "gpu_layers"),
+                         (self.max_tokens, "max_tokens")]:
             var.trace_add("write", lambda *_, v=var, k=key: self.config.set(k, v.get()))
         self.detect_binary()
-        for label, var, browse in [("Server Binary", self.bin, True),
-                                   ("Model (.gguf)", self.model, True),
-                                   ("Projector (.gguf)", self.proj, True)]:
-            self.field(f, label, var, browse, kind="file")
+        
+        f1 = self.field(f, "Server Binary", self.bin, True, kind="file")
+        ToolTip(f1, self.tooltips.get("server_binary"))
+        f2 = self.field(f, "Model (.gguf)", self.model, True, kind="file")
+        ToolTip(f2, self.tooltips.get("model_file"))
+        f3 = self.field(f, "Projector (.gguf)", self.proj, True, kind="file")
+        ToolTip(f3, self.tooltips.get("projector_file"))
+
         tk.Frame(f, height=12, bg=BG).pack()
         params = tk.Frame(f, bg=BG)
         params.pack(fill="x")
-        for lbl, v in [("Port", self.port), ("Context", self.ctx), ("GPU Layers", self.gpu)]:
+        for lbl, v, tt_key in [("Port", self.port, "port"), 
+                               ("Context", self.ctx, "context"), 
+                               ("GPU Layers", self.gpu, "gpu_layers"),
+                               ("Max Tokens", self.max_tokens, "max_tokens")]:
             col = tk.Frame(params, bg=BG)
             col.pack(side="left", fill="x", expand=True, padx=3)
             tk.Label(col, text=lbl, bg=BG, fg=DIM, font=("Sans", 7)).pack(anchor="w", pady=(0, 2))
-            tk.Entry(col, textvariable=v, bg=INPUT, fg=TEXT, bd=0, relief="flat",
-                     highlightthickness=0, font=("Sans", 8), insertbackground=BLUE, justify="center").pack(fill="x", ipady=5)
+            ent = tk.Entry(col, textvariable=v, bg=INPUT, fg=TEXT, bd=0, relief="flat",
+                     highlightthickness=0, font=("Sans", 8), insertbackground=BLUE, justify="center")
+            ent.pack(fill="x", ipady=5)
+            ToolTip(ent, self.tooltips.get(tt_key))
+
         tk.Frame(f, height=8, bg=BG).pack()
         vram_frame = tk.Frame(f, bg=BG)
         vram_frame.pack(fill="x")
@@ -427,23 +494,27 @@ class App:
         self.vram_label.pack(side="left", fill="x", expand=True)
         self.btn_kill_gpu = self.btn(vram_frame, "Kill GPU Processes", BLUE, self.kill_gpu_processes)
         self.btn_kill_gpu.pack(side="right")
+        ToolTip(self.btn_kill_gpu, self.tooltips.get("kill_gpu"))
+
         tk.Frame(f, height=4, bg=BG).pack()
         tip = tk.Frame(f, bg=CARD)
         tip.pack(fill="x", padx=1, pady=1)
-        tk.Label(tip, text="16GB VRAM defaults: Context 8192, GPU Layers 99, Batch 512",
+        tk.Label(tip, text="VRAM Tip: If 'out of memory', lower GPU Layers (e.g. 33) or Context.",
                  bg=CARD, fg=DIM, font=("Sans", 7)).pack(pady=5)
         tk.Frame(f, height=12, bg=BG).pack()
         btns = tk.Frame(f, bg=BG)
         btns.pack(fill="x")
         self.btn_start = self.btn(btns, "Start Server", BLUE, self.start_server)
         self.btn_start.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ToolTip(self.btn_start, self.tooltips.get("start_server"))
         self.btn_stop = self.btn(btns, "Stop Server", BLUE, self.stop_server)
+        ToolTip(self.btn_stop, self.tooltips.get("stop_server"))
         self.btn_stop.pack(side="left", fill="x", expand=True)
-        self.btn_stop.config(state="disabled", bg=CARD)
+        self.btn_stop.config(state="disabled", bg=CARD, disabledforeground="white")
         tk.Frame(f, height=12, bg=BG).pack()
         log_frame = tk.Frame(f, bg=BG)
         log_frame.pack(fill="both", expand=True)
-        self.log = tk.Text(log_frame, height=11, bg="#1a1d23", fg="#00ff00",
+        self.log = tk.Text(log_frame, height=11, bg="#1a1d23", fg=TEXT,
                            bd=0, relief="flat", highlightthickness=0, font=("Monospace", 7), wrap="word")
         self.log.pack(side="left", fill="both", expand=True)
         s_log = tk.Scrollbar(log_frame, orient="vertical", command=self.log.yview,
@@ -460,13 +531,18 @@ class App:
         left.pack(side="left", fill="both", expand=True)
         tool = tk.Frame(left, bg=BG)
         tool.pack(fill="x", pady=(0, 10))
-        self.btn(tool, "Add Folder", BLUE, self.add_folder).pack(side="left", padx=(0, 8))
+        btn_add = self.btn(tool, "Add Folder", BLUE, self.add_folder)
+        btn_add.pack(side="left", padx=(0, 8))
+        ToolTip(btn_add, self.tooltips.get("add_folder"))
         self.btn_proc = self.btn(tool, "Start Processing", BLUE, self.toggle_batch)
         self.btn_proc.pack(side="left")
+        ToolTip(self.btn_proc, self.tooltips.get("start_batch"))
         self.overwrite = tk.BooleanVar(value=False)
-        tk.Checkbutton(tool, text="Overwrite", variable=self.overwrite, bg=BG, fg=TEXT,
+        cb_ovr = tk.Checkbutton(tool, text="Overwrite", variable=self.overwrite, bg=BG, fg=TEXT,
                        selectcolor=INPUT, activebackground=BG, font=("Sans", 8),
-                       highlightthickness=0).pack(side="right")
+                       highlightthickness=0)
+        cb_ovr.pack(side="right")
+        ToolTip(cb_ovr, self.tooltips.get("overwrite"))
         self.queue_scroll = ScrollFrame(left)
         self.queue_scroll.pack(fill="both", expand=True)
         prog = tk.Frame(left, bg=BG)
@@ -494,24 +570,30 @@ class App:
     def build_editor(self):
         tool = tk.Frame(self.tab_editor, bg=BG)
         tool.pack(fill="x", padx=25, pady=15)
-        self.btn(tool, "Load Folder", BLUE, self.load_editor_folder).pack(side="left")
+        btn_load = self.btn(tool, "Load Folder", BLUE, self.load_editor_folder)
+        btn_load.pack(side="left")
+        ToolTip(btn_load, self.tooltips.get("load_editor"))
         self.editor_folder_label = tk.Label(tool, text="No folder loaded", bg=BG, fg=DIM, font=("Sans", 8))
         self.editor_folder_label.pack(side="left", padx=15)
 
         # Add filter input
         filter_frame = tk.Frame(tool, bg=BG)
         filter_frame.pack(side="right")
-        tk.Label(filter_frame, text="Filter (in captions):", bg=BG, fg=DIM, font=("Sans", 8)).pack(side="left", padx=(10, 2))
+        tk.Label(filter_frame, text="Filter (in captions):", bg=BG, fg=DIM, font=("Sans", 9)).pack(side="left", padx=(10, 2))
         self.editor_filter_var = tk.StringVar()
         filter_entry = tk.Entry(filter_frame, textvariable=self.editor_filter_var, bg=INPUT, fg=TEXT, bd=0, relief="flat",
-                              highlightthickness=0, font=("Sans", 8), insertbackground=BLUE, width=20)
-        filter_entry.pack(side="left")
+                              highlightthickness=0, font=("Sans", 10), insertbackground=BLUE, width=25)
+        filter_entry.pack(side="left", ipady=6)
+        ToolTip(filter_entry, self.tooltips.get("filter_editor"))
         filter_entry.bind("<Enter>", lambda e: filter_entry.config(bg=HOVER))
         filter_entry.bind("<Leave>", lambda e: filter_entry.config(bg=INPUT))
         filter_entry.bind("<Return>", lambda e: self.apply_editor_filter())
+        
         clear_btn = tk.Button(filter_frame, text="Clear", bg=CARD, fg=TEXT, bd=0, relief="flat",
-                            font=("Sans", 8), cursor="hand2", command=self.clear_editor_filter)
-        clear_btn.pack(side="left", padx=(2, 0))
+                            font=("Sans", 9, "bold"), cursor="hand2", command=self.clear_editor_filter,
+                            activebackground=HOVER, activeforeground=TEXT, highlightthickness=0)
+        ToolTip(clear_btn, self.tooltips.get("clear_filter"))
+        clear_btn.pack(side="left", padx=(4, 0), ipady=5, ipadx=10)
         clear_btn.bind("<Enter>", lambda e: clear_btn.config(bg=HOVER))
         clear_btn.bind("<Leave>", lambda e: clear_btn.config(bg=CARD))
 
@@ -564,6 +646,11 @@ class App:
 
         self.img_canvas.bind("<Enter>", _bind_mousewheel)
         self.img_canvas.bind("<Leave>", _unbind_mousewheel)
+        
+        # Auto-load last folder if available
+        last_folder = self.config.get("last_editor_folder")
+        if last_folder and Path(last_folder).exists():
+            self.root.after(100, lambda: self.load_editor_folder(last_folder))
     # ---------------- CROP TAB ----------------
     def build_crop(self):
         f = tk.Frame(self.tab_crop, bg=BG)
@@ -571,23 +658,27 @@ class App:
         
         self.crop_in = tk.StringVar()
         self.crop_out = tk.StringVar()
-        self.crop_res = tk.StringVar(value="Auto (Best Fit)")
+        self.crop_res = tk.StringVar(value="Keep Original (No Crop)")
         self.crop_model = None
         self.crop_worker = None
 
         tk.Label(f, text="Input Folder:", bg=BG, fg=DIM, font=("Sans", 9)).pack(anchor="w")
         row_in = tk.Frame(f, bg=BG)
         row_in.pack(fill="x", pady=(0, 10))
-        tk.Entry(row_in, textvariable=self.crop_in, bg=INPUT, fg=TEXT, bd=0, relief="flat",
-                 highlightthickness=0, font=("Sans", 9), insertbackground=BLUE).pack(side="left", fill="x", expand=True, ipady=6)
+        ent_in = tk.Entry(row_in, textvariable=self.crop_in, bg=INPUT, fg=TEXT, bd=0, relief="flat",
+                 highlightthickness=0, font=("Sans", 9), insertbackground=BLUE)
+        ent_in.pack(side="left", fill="x", expand=True, ipady=6)
+        ToolTip(ent_in, self.tooltips.get("crop_in"))
         tk.Button(row_in, text="…", bg=CARD, fg=TEXT, bd=0, relief="flat", highlightthickness=0, width=4,
                   command=self.crop_select_in).pack(side="right", padx=(4, 0))
 
         tk.Label(f, text="Output Folder:", bg=BG, fg=DIM, font=("Sans", 9)).pack(anchor="w")
         row_out = tk.Frame(f, bg=BG)
         row_out.pack(fill="x", pady=(0, 10))
-        tk.Entry(row_out, textvariable=self.crop_out, bg=INPUT, fg=TEXT, bd=0, relief="flat",
-                 highlightthickness=0, font=("Sans", 9), insertbackground=BLUE).pack(side="left", fill="x", expand=True, ipady=6)
+        ent_out = tk.Entry(row_out, textvariable=self.crop_out, bg=INPUT, fg=TEXT, bd=0, relief="flat",
+                 highlightthickness=0, font=("Sans", 9), insertbackground=BLUE)
+        ent_out.pack(side="left", fill="x", expand=True, ipady=6)
+        ToolTip(ent_out, self.tooltips.get("crop_out"))
         tk.Button(row_out, text="…", bg=CARD, fg=TEXT, bd=0, relief="flat", highlightthickness=0, width=4,
                   command=lambda: self.crop_out.set(self._folder_picker("Select Output Folder"))).pack(side="right", padx=(4, 0))
 
@@ -605,11 +696,13 @@ class App:
         for opt in res_opts:
             self.res_menu.add_command(label=opt, command=lambda o=opt: self.crop_res.set(o))
         self.res_mb.pack(fill="x", ipady=8)
+        ToolTip(self.res_mb, self.tooltips.get("crop_res"))
         
         tk.Label(f, text="Available Sizes: 768, 1024, 1536, 2048", bg=BG, fg=DIM, font=("Sans", 7)).pack(anchor="w", pady=(2, 0))
         
         tk.Frame(f, height=15, bg=BG).pack()
         self.btn_start_crop = self.btn(f, "START CROP PROCESSING", BLUE, self.start_crop)
+        ToolTip(self.btn_start_crop, self.tooltips.get("start_crop"))
         
         tk.Frame(f, height=10, bg=BG).pack()
         self.crop_progress = ttk.Progressbar(f, mode="determinate")
@@ -689,7 +782,8 @@ class App:
         # source
         tk.Label(f, text="Image-Caption folder:", bg=BG, fg=DIM, font=("Sans", 9)).pack(anchor="w")
         self.filter_src_var = tk.StringVar()
-        self.field(f, "", self.filter_src_var, True, kind="folder")
+        f_src = self.field(f, "", self.filter_src_var, True, kind="folder")
+        ToolTip(f_src, self.tooltips.get("filter_src"))
         # keyword
         tk.Frame(f, height=8, bg=BG).pack()
         tk.Label(f, text="Keyword (case-insensitive):", bg=BG, fg=DIM, font=("Sans", 9)).pack(anchor="w")
@@ -697,14 +791,18 @@ class App:
         kw_entry = tk.Entry(f, textvariable=self.filter_kw_var, bg=INPUT, fg=TEXT, bd=0, relief="flat",
                             highlightthickness=0, font=("Sans", 10), insertbackground=BLUE)
         kw_entry.pack(fill="x", ipady=6)
+        ToolTip(kw_entry, self.tooltips.get("filter_kw"))
         # target
         tk.Frame(f, height=8, bg=BG).pack()
         tk.Label(f, text="Target folder:", bg=BG, fg=DIM, font=("Sans", 9)).pack(anchor="w")
         self.filter_tgt_var = tk.StringVar()
-        self.field(f, "", self.filter_tgt_var, True, kind="folder")
+        f_tgt = self.field(f, "", self.filter_tgt_var, True, kind="folder")
+        ToolTip(f_tgt, self.tooltips.get("filter_tgt"))
         # button
         tk.Frame(f, height=15, bg=BG).pack()
-        self.btn(f, "Move matched pairs", BLUE, self.move_keyword_pairs).pack(anchor="e")
+        btn_m = self.btn(f, "Move matched pairs", BLUE, self.move_keyword_pairs)
+        btn_m.pack(anchor="e")
+        ToolTip(btn_m, self.tooltips.get("filter_move"))
         # log
         tk.Frame(f, height=15, bg=BG).pack()
         log_frame = tk.Frame(f, bg=BG)
@@ -757,24 +855,33 @@ class App:
         self.filter_log.see("end")
         self.filter_log.config(state="disabled")
     # ---------------- EDITOR UTILS ----------------
-    def load_editor_folder(self):
-        path = Path(self._folder_picker())
+    def load_editor_folder(self, auto_path=None):
+        if auto_path:
+            path = Path(auto_path)
+        else:
+            path = Path(self._folder_picker())
+            
         if path and path.is_dir():
             self.current_editor_folder = path
+            self.config.set("last_editor_folder", str(path))
             self.editor_folder_label.config(text=path.name)
             self.load_editor_images()
 
     def create_editor_item(self, img_path: Path, thumb_img=None):
-        item_frame = tk.Frame(self.img_list_frame, bg=CARD, height=self.thumb_size + 20)
+        # Increased height slightly for better spacing
+        base_height = self.thumb_size + 30 
+        item_frame = tk.Frame(self.img_list_frame, bg=CARD, height=base_height)
         item_frame.pack(fill="x", pady=5, padx=2)
         item_frame.pack_propagate(False)
         
         # Image Container
-        img_container = tk.Frame(item_frame, bg=CARD, width=self.thumb_size + 20)
+        img_col_width = self.thumb_size + 20
+        img_container = tk.Frame(item_frame, bg=BG, width=img_col_width)
         img_container.pack(side="left", fill="y")
+        img_container.pack_propagate(False) 
         
         # Placeholder or Image
-        img_label = tk.Label(img_container, bg=CARD, fg=DIM)
+        img_label = tk.Label(img_container, bg=BG, fg=DIM)
         if thumb_img:
             photo = ImageTk.PhotoImage(thumb_img)
             img_label.configure(image=photo)
@@ -784,13 +891,26 @@ class App:
             
         img_label.pack(expand=True)
         img_label.bind("<Double-Button-1>", lambda e: self.show_zoom(img_path))
+        ToolTip(img_label, "Double-click to zoom")
         
-        # Info & Text Container
+        # Text Container
         right_container = tk.Frame(item_frame, bg=CARD)
-        right_container.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+        right_container.pack(side="left", fill="both", expand=True, padx=12, pady=8)
         
-        tk.Label(right_container, text=img_path.name, bg=CARD, fg=DIM, font=("Sans", 8), anchor="w").pack(fill="x")
+        # Header Row
+        header = tk.Frame(right_container, bg=CARD)
+        header.pack(fill="x", pady=(0, 5))
         
+        tk.Label(header, text=img_path.name, bg=CARD, fg=DIM, font=("Sans", 9, "bold"), anchor="w").pack(side="left", fill="x", expand=True)
+        
+        # Expand Toggle Button
+        btn_expand = tk.Button(header, text="▼ Expand", bg=BLUE, fg="white", bd=0, relief="flat",
+                               font=("Sans", 8, "bold"), activebackground=HOVER, activeforeground="white",
+                               cursor="hand2", highlightthickness=0)
+        btn_expand.pack(side="right")
+        ToolTip(btn_expand, "Toggle large view")
+
+        # Text Area
         txt_path = img_path.with_suffix(".txt")
         initial_content = ""
         if txt_path.exists():
@@ -798,10 +918,69 @@ class App:
             except: pass
             
         text_area = tk.Text(right_container, bg=INPUT, fg=TEXT, bd=0, relief="flat",
-                            highlightthickness=0, font=("Sans", 9), wrap="word", insertbackground=BLUE)
+                            highlightthickness=0, font=("Sans", 10), wrap="word", insertbackground=BLUE)
         text_area.insert("1.0", initial_content)
-        text_area.pack(fill="both", expand=True, pady=(5, 0))
+        text_area.pack(fill="both", expand=True)
         
+        # --- Expand Logic ---
+        self.expanded_state = False # Note: This instance var would be overwritten if shared, 
+                                    # but we need per-item state.
+                                    # Better to attach state to the button or frame.
+        item_frame.expanded = False
+        
+        def _toggle_expand():
+            is_exp = not item_frame.expanded
+            item_frame.expanded = is_exp
+            
+            if is_exp:
+                # EXPAND
+                btn_expand.config(text="▲ Collapse", bg=BG)
+                
+                # Allow frame to grow
+                item_frame.pack_propagate(True)
+                
+                # Make text box taller (e.g. 25 lines)
+                text_area.config(height=25)
+                
+                # Reload image larger if possible (e.g. 500px)
+                # We need to run this in a thread ideally, but for now fast:
+                try:
+                    img = Image.open(img_path)
+                    # Scale image to match new height roughly (or 500px width limit)
+                    # We want it to be bigger.
+                    target_size = 500
+                    img.thumbnail((target_size, target_size), Image.LANCZOS)
+                    ph = ImageTk.PhotoImage(img)
+                    img_label.configure(image=ph)
+                    img_label.image = ph
+                    # Allow img container to widen
+                    img_container.config(width=target_size + 20)
+                except: pass
+                
+            else:
+                # COLLAPSE
+                btn_expand.config(text="▼ Expand", bg=BLUE)
+                
+                # Reset size constraints
+                item_frame.pack_propagate(False)
+                item_frame.config(height=base_height)
+                
+                # Reset text height (it will be forced by frame height anyway)
+                text_area.config(height=1) 
+                
+                # Reset image to thumb size
+                try:
+                    # Check cache for original thumb
+                    thumb = self.thumb_cache.get(str(img_path))
+                    if thumb:
+                        ph = ImageTk.PhotoImage(thumb)
+                        img_label.configure(image=ph)
+                        img_label.image = ph
+                    img_container.config(width=img_col_width)
+                except: pass
+
+        btn_expand.config(command=_toggle_expand)
+
         def _save(event=None):
             content = text_area.get("1.0", "end-1c")
             try: txt_path.write_text(content, encoding="utf-8")
@@ -811,6 +990,29 @@ class App:
         
         self.editor_items.append((img_path, item_frame))
         return img_label
+    def _load_thumbnails_batch(self, items):
+        """Load thumbnails for a batch and update UI."""
+        for path, lbl in items:
+            # Check cache
+            thumb = self.thumb_cache.get(str(path))
+            if not thumb:
+                try:
+                    img = Image.open(path)
+                    # Use resize/thumbnail with Aspect Fit logic
+                    # We want the image to FIT inside 200x200 but keep ratio
+                    img.thumbnail((self.thumb_size, self.thumb_size), Image.LANCZOS)
+                    thumb = img
+                    self.thumb_cache[str(path)] = thumb
+                except: pass
+            
+            if thumb:
+                # Update UI on main thread
+                self.root.after(0, lambda l=lbl, t=thumb: self._update_thumb(l, t))
+            
+            # Tiny sleep to keep UI responsive during heavy processing
+            # import time; time.sleep(0.005) 
+        
+        self.is_loading_more = False
     def show_zoom(self, img_path: Path):
         if hasattr(self, "zoom_tl"):
             self.zoom_tl.destroy()
@@ -877,12 +1079,16 @@ class App:
     # ---------------------------------------------------------
     #  Cross-platform folder picker
     # ---------------------------------------------------------
-    def _folder_picker(self, title="Select folder"):
+    def _folder_picker(self, title="Select folder", is_server=False):
         """Return path string; empty if cancelled."""
+        initial = self.config.get("last_dir", str(Path.home()))
         
         # Windows: Use native Tkinter dialog (it's actually native on Windows)
         if os.name == 'nt':
-            return filedialog.askdirectory(title=title)
+            path = filedialog.askdirectory(title=title, initialdir=initial)
+            if path and not is_server:
+                self.config.set("last_dir", str(Path(path).parent))
+            return path
             
         # Linux/Unix: Try zenity for better DE integration (XFCE/GNOME/etc)
         try:
@@ -891,7 +1097,7 @@ class App:
             
             # Use zenity without timeout as user interaction takes time
             result = subprocess.run(
-                ["zenity", "--file-selection", "--directory", "--title", title],
+                ["zenity", "--file-selection", "--directory", "--title", title, f"--filename={initial}/"],
                 capture_output=True,
                 text=True,
                 check=False  # Don't raise exception on cancel (exit code 1)
@@ -899,7 +1105,10 @@ class App:
             
             if result.returncode == 0:
                 path = result.stdout.strip()
-                if path: return path
+                if path:
+                    if not is_server:
+                        self.config.set("last_dir", str(Path(path).parent))
+                    return path
             # If user cancelled (code 1), return empty string immediately
             # do NOT fall back to tk picker
             return ""
@@ -914,7 +1123,7 @@ class App:
         # Fallback to custom Tk picker if zenity wasn't found
         return self._folder_picker_tk(title)
     
-    def _folder_picker_tk(self, title="Select folder"):
+    def _folder_picker_tk(self, title="Select folder", is_server=False):
         """Custom Tk folder picker as fallback."""
         out = []
         top = tk.Toplevel(self.root)
@@ -925,8 +1134,8 @@ class App:
         top.grab_set()
         top.focus()
 
-        current = Path.cwd()
-        addr = tk.StringVar(value=str(current))
+        initial = self.config.get("last_dir", str(Path.home()))
+        addr = tk.StringVar(value=initial)
 
         # address bar
         bar = tk.Frame(top, bg=BG)
@@ -964,7 +1173,10 @@ class App:
         def _select():
             sel = lb.curselection()
             if not sel:
-                out.append(addr.get())
+                path = addr.get()
+                if not is_server:
+                    self.config.set("last_dir", str(Path(path).parent))
+                out.append(path)
                 top.destroy()
                 return
             name = lb.get(sel[0])
@@ -1019,11 +1231,20 @@ class App:
 
     # ---------------- SERVER CONTROL (NO-HANG) ----------------
     def start_server(self):
+        # Ensure context is a valid number, fallback to default if not
+        ctx_val = self.ctx.get().strip()
+        if not ctx_val or not ctx_val.isdigit():
+            ctx_val = DEFAULT_CTX
+            self.ctx.set(DEFAULT_CTX)
+            
+        # Use -c as a more universal flag for context size
         cmd = [self.bin.get(), "-m", self.model.get(), "--port", self.port.get(),
-               "--ctx-size", self.ctx.get(), "-ngl", self.gpu.get(), "-b", DEFAULT_BATCH]
+               "-c", ctx_val, "-ngl", self.gpu.get(), "-b", DEFAULT_BATCH]
         if self.proj.get():
             cmd.extend(["--mmproj", self.proj.get()])
-        self.log.insert("end", "Starting server...\n")
+        
+        cmd_str = " ".join(cmd)
+        self.log.insert("end", f"Starting server with command:\n{cmd_str}\n\n")
         
         # Windows compatibility for subprocess
         kwargs = {}
@@ -1037,7 +1258,7 @@ class App:
             self.server_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                                stderr=subprocess.STDOUT, text=True,
                                                bufsize=1, **kwargs)
-            self.btn_start.config(state="disabled", bg=CARD)
+            self.btn_start.config(state="disabled", bg=CARD, disabledforeground="white")
             self.btn_stop.config(state="normal", bg=RED)
             threading.Thread(target=self.watch_server, daemon=True).start()
         except Exception as e:
@@ -1060,6 +1281,8 @@ class App:
         try:
             for line in iter(self.server_proc.stdout.readline, ""):
                 if line:
+                    if "out of memory" in line.lower() or "cudaMalloc failed" in line:
+                        line += "\n>>> ERROR: GPU OUT OF MEMORY\n>>> TRY: Lower 'GPU Layers' to 33 or 20, then try again.\n"
                     self.log.insert("end", line)
                     self.log.see("end")
         except Exception:
@@ -1067,7 +1290,7 @@ class App:
         self.root.after(0, self.reset_ui)
     def reset_ui(self):
         self.btn_start.config(state="normal", bg=BLUE)
-        self.btn_stop.config(state="disabled", bg=CARD)
+        self.btn_stop.config(state="disabled", bg=CARD, disabledforeground="white")
         self.log.insert("end", "Server stopped\n")
     # ---------------- BATCH  (USES CUSTOM PROMPT PER FOLDER) ----------------
     def add_folder(self):
@@ -1111,6 +1334,9 @@ class App:
             self.root.after(0, lambda: self.btn_proc.config(text="Start Processing", bg=BLUE))
             self.root.after(0, lambda: self.prog_lbl.config(text="No folders in queue"))
             return
+            
+        self.root.after(0, lambda: self.prog_lbl.config(text="Processing..."))
+        
         for idx, item in enumerate(self.queue):
             if not self.batch_running:
                 break
@@ -1131,19 +1357,31 @@ class App:
                     #  ➜➜➜  USE THE PROMPT WRITTEN IN THE GUI FOR THIS FOLDER  ➜➜➜
                     prompt = item.get_prompt() or DEFAULT_PROMPT
                     b64 = base64.b64encode(img.read_bytes()).decode()
+                    
+                    try:
+                        m_tokens = int(self.max_tokens.get())
+                    except:
+                        m_tokens = 1024
+                        
                     resp = self.client.chat.completions.create(
                         model=Path(self.model.get()).stem,
                         messages=[{"role": "user", "content": [
                             {"type": "text", "text": prompt},
                             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
                         ]}],
-                        max_tokens=300
+                        max_tokens=m_tokens,
+                        temperature=0.7,
+                        top_p=0.9,
+                        frequency_penalty=0.2
                     )
                     txt.write_text(resp.choices[0].message.content.strip(), encoding="utf-8")
                     done += 1
                     self.root.after(0, lambda name=img.name: self.log_status(f"✓ {name}"))
                 except Exception as e:
-                    self.root.after(0, lambda name=img.name, err=str(e): self.log_status(f"✗ {name}: {err}"))
+                    err_msg = str(e)
+                    if "exceed_context_size_error" in err_msg or "context size" in err_msg:
+                        err_msg = f"CONTEXT ERROR: Server context too small ({self.ctx.get()}). Try increasing 'Context' in Server tab and restart server."
+                    self.root.after(0, lambda name=img.name, err=err_msg: self.log_status(f"✗ {name}: {err}"))
                 pct = int(((idx + (done / total_imgs)) / total) * 100) if total_imgs > 0 else 0
                 self.root.after(0, lambda p=pct: self.progress.configure(value=p))
                 self.root.after(0, lambda d=done, t=total_imgs, i=item:
@@ -1277,10 +1515,11 @@ class App:
         entry.bind("<Enter>", lambda e: entry.config(bg=HOVER))
         entry.bind("<Leave>", lambda e: entry.config(bg=INPUT))
         if browse:
+            is_server = "model" in str(var) or "projector" in str(var) or "binary" in str(var)
             if kind == "file":
                 cmd = lambda: var.set(self._file_picker(f"Select {label if label else 'file'}"))
             else:
-                cmd = lambda: var.set(self._folder_picker(f"Select {label if label else 'folder'}"))
+                cmd = lambda: var.set(self._folder_picker(f"Select {label if label else 'folder'}", is_server=is_server))
 
             browse_btn = tk.Button(row, text="…", bg=CARD, fg=TEXT, bd=0, relief="flat",
                                   highlightthickness=0, width=4, font=("Sans", 10, "bold"),
@@ -1289,12 +1528,13 @@ class App:
             # Add hover effects to browse button
             browse_btn.bind("<Enter>", lambda e: browse_btn.config(bg=HOVER))
             browse_btn.bind("<Leave>", lambda e: browse_btn.config(bg=CARD))
+        return entry
 
     def btn(self, parent, text, color, cmd):
         """Create a modern styled button with hover effects."""
         btn = tk.Button(parent, text=text, bg=color, fg="white", bd=0, relief="flat",
                         highlightthickness=0, font=("Sans", 9, "bold"), cursor="hand2", command=cmd,
-                        activebackground=HOVER, activeforeground=TEXT)
+                        activebackground=HOVER, activeforeground=TEXT, disabledforeground="white")
         btn.pack(fill="x", ipady=8)
         # Add hover effects
         btn.bind("<Enter>", lambda e: btn.config(bg=HOVER))
