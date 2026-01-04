@@ -4,7 +4,7 @@
 Joschek’s Captioner
 """
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext, filedialog
+from tkinter import ttk, messagebox, filedialog
 import subprocess
 import os
 import shutil
@@ -13,17 +13,8 @@ import signal
 import glob
 import base64
 import json
-import numpy as np
-import cv2
 from pathlib import Path
-from openai import OpenAI
 from PIL import Image, ImageTk
-
-# Optional YOLO import
-try:
-    from ultralytics import YOLO
-except ImportError:
-    YOLO = None
 
 # ---------------- CONFIG ----------------
 CONFIG_FILE = Path.home() / ".config" / "joschek_captioner.json"
@@ -128,34 +119,78 @@ class Config:
 
 # ---------------- WIDGETS ----------------
 class QueueItem(tk.Frame):
-    def __init__(self, parent, path: Path, remove_cb, config):
+    def __init__(self, parent, path: Path, remove_cb, status_cb, config, overwrite_default=False):
         super().__init__(parent, bg=CARD)
         self.folder_path = path
-        self.status = "pending"
+        self.status = "draft"
         self.remove_cb = remove_cb
+        self.status_cb = status_cb
         self.config = config
+        self.overwrite_var = tk.BooleanVar(value=overwrite_default)
+        
         main = tk.Frame(self, bg=CARD)
         main.pack(fill="both", expand=True, padx=14, pady=10)
+        
         header = tk.Frame(main, bg=CARD)
         header.pack(fill="x", pady=(0, 6))
-        tk.Label(header, text=self.folder_path.name, bg=CARD, fg=TEXT,
-                 font=("Sans", 9), anchor="w").pack(side="left", fill="x", expand=True)
-        self.status_lbl = tk.Label(header, text="Ready", bg=CARD, fg=DIM, font=("Sans", 8))
-        self.status_lbl.pack(side="left", padx=8)
+
+        # Pack items Right-to-Left: Close -> Status -> Button -> Overwrite -> Name (fill)
+        
         close = tk.Label(header, text="×", bg=CARD, fg=DIM, font=("Sans", 14), cursor="hand2")
         close.pack(side="right")
         close.bind("<Button-1>", lambda e: remove_cb(self))
         close.bind("<Enter>", lambda e: close.config(fg=RED))
         close.bind("<Leave>", lambda e: close.config(fg=DIM))
+
+        self.status_lbl = tk.Label(header, text="Draft", bg=CARD, fg=ORANGE, font=("Sans", 8, "bold"))
+        self.status_lbl.pack(side="right", padx=8)
+
+        self.btn_queue = tk.Button(header, text="Add to Queue", bg=BLUE, fg="white", bd=0, relief="flat",
+                                   font=("Sans", 8, "bold"), cursor="hand2", command=self.add_to_queue,
+                                   activebackground=HOVER, activeforeground=TEXT, highlightthickness=0)
+        self.btn_queue.pack(side="right", padx=(0, 8), ipadx=8, ipady=2)
+        
+        self.cb_overwrite = tk.Checkbutton(header, text="Overwrite", variable=self.overwrite_var,
+                                           bg=CARD, fg=DIM, selectcolor=INPUT, activebackground=CARD,
+                                           font=("Sans", 8), highlightthickness=0)
+        self.cb_overwrite.pack(side="right", padx=(0, 8))
+
+        # Name takes remaining space on left
+        tk.Label(header, text=self.folder_path.name, bg=CARD, fg=TEXT,
+                 font=("Sans", 9, "bold"), anchor="w").pack(side="left", fill="x", expand=True)
+        
         tk.Label(main, text=str(self.folder_path), bg=CARD, fg=DIM, font=("Sans", 7), anchor="w").pack(fill="x", pady=(0, 8))
+        
         self.prompt = tk.Text(main, height=3, bg=INPUT, fg=TEXT, bd=0, relief="flat",
                               highlightthickness=0, font=("Sans", 8), insertbackground=BLUE, wrap="word")
         self.prompt.insert("1.0", config.get("last_prompt", DEFAULT_PROMPT))
         self.prompt.bind("<KeyRelease>", lambda e: config.set("last_prompt", self.get_prompt()))
-        self.prompt.pack(fill="x")
+        self.prompt.pack(fill="x", pady=(0, 8))
+
     def set_status(self, state, msg=""):
-        color = {"processing": BLUE, "done": GREEN, "error": RED}.get(state, DIM)
-        self.status_lbl.config(text=msg, fg=color)
+        self.status = state
+        color = {"processing": BLUE, "done": GREEN, "error": RED, "pending": CYAN, "draft": ORANGE}.get(state, DIM)
+        display_text = msg if msg else state.title()
+        self.status_lbl.config(text=display_text, fg=color)
+        
+        if state == "draft":
+            self.btn_queue.pack(side="right", padx=(0, 8), ipadx=8, ipady=2)
+            self.cb_overwrite.pack(side="right", padx=(0, 8))
+        else:
+            self.btn_queue.pack_forget()
+            # We keep overwrite checkbox visible? Or hide it?
+            # Usually you can't change settings once queued/running.
+            # Hiding it makes sense to lock state.
+            self.cb_overwrite.pack_forget()
+            if state == "pending":
+                self.status_lbl.config(text="In Queue")
+        
+        if self.status_cb:
+            self.status_cb()
+
+    def add_to_queue(self):
+        self.set_status("pending")
+
     def get_prompt(self):
         return self.prompt.get("1.0", "end-1c").strip()
 
@@ -168,7 +203,10 @@ class ScrollFrame(tk.Frame):
                                  activebackground=HOVER, elementborderwidth=0)
         self.content = tk.Frame(canvas, bg=BG)
         self.content.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.content, anchor="nw")
+        
+        self.window_id = canvas.create_window((0, 0), window=self.content, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(self.window_id, width=e.width))
+        
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -187,6 +225,10 @@ class CropWorker:
         self.running = True
 
     def run(self):
+        # Lazy imports for speed
+        import cv2
+        import numpy as np
+        
         try:
             os.makedirs(self.output_path, exist_ok=True)
             
@@ -205,7 +247,8 @@ class CropWorker:
             self.model.fuse()
 
             for i, f in enumerate(files):
-                if not self.running: break
+                if not self.running:
+                    break
 
                 filename = os.path.basename(f)
                 name_no_ext = os.path.splitext(filename)[0]
@@ -227,7 +270,8 @@ class CropWorker:
                 img_h, img_w = image.shape[:2]
 
                 for mask_idx, mask in enumerate(results[0].masks):
-                    if not self.running: break
+                    if not self.running:
+                        break
 
                     points = mask.xy[0].astype(np.int32)
                     x, y, w, h = cv2.boundingRect(points)
@@ -272,8 +316,10 @@ class CropWorker:
                     crop_y1 = cy - (crop_h // 2)
                     
                     # Adjust to stay within image bounds
-                    if crop_x1 < 0: crop_x1 = 0
-                    if crop_y1 < 0: crop_y1 = 0
+                    if crop_x1 < 0:
+                        crop_x1 = 0
+                    if crop_y1 < 0:
+                        crop_y1 = 0
                     
                     crop_x2 = crop_x1 + crop_w
                     crop_y2 = crop_y1 + crop_h
@@ -348,7 +394,10 @@ class App:
         self.build_editor()
         self.build_filter()
         self.build_crop()
-        self.update_vram_info() # Start VRAM monitoring
+        
+        # Start VRAM monitoring after GUI load
+        self.root.after(1000, self.update_vram_info)
+        
         root.protocol("WM_DELETE_WINDOW", self.on_close)
     # ---------------- MODERN STYLES ----------------
     def setup_styles(self):
@@ -537,12 +586,6 @@ class App:
         self.btn_proc = self.btn(tool, "Start Processing", BLUE, self.toggle_batch)
         self.btn_proc.pack(side="left")
         ToolTip(self.btn_proc, self.tooltips.get("start_batch"))
-        self.overwrite = tk.BooleanVar(value=False)
-        cb_ovr = tk.Checkbutton(tool, text="Overwrite", variable=self.overwrite, bg=BG, fg=TEXT,
-                       selectcolor=INPUT, activebackground=BG, font=("Sans", 8),
-                       highlightthickness=0)
-        cb_ovr.pack(side="right")
-        ToolTip(cb_ovr, self.tooltips.get("overwrite"))
         self.queue_scroll = ScrollFrame(left)
         self.queue_scroll.pack(fill="both", expand=True)
         prog = tk.Frame(left, bg=BG)
@@ -555,7 +598,19 @@ class App:
         right = tk.Frame(main, bg=BG, width=250)
         right.pack(side="right", fill="both", expand=False, padx=(15, 0))
         right.pack_propagate(False)
-        tk.Label(right, text="Processing Status", bg=BG, fg=TEXT, font=("Sans", 9)).pack(anchor="w", pady=(0, 5))
+        
+        # Queue Summary
+        tk.Label(right, text="Up Next (Queue)", bg=BG, fg=TEXT, font=("Sans", 9, "bold")).pack(anchor="w", pady=(0, 5))
+        queue_frame = tk.Frame(right, bg=BG, height=150)
+        queue_frame.pack(fill="x", pady=(0, 10))
+        queue_frame.pack_propagate(False)
+        
+        self.queue_summary = tk.Listbox(queue_frame, bg=INPUT, fg=TEXT, bd=0, highlightthickness=0, 
+                                        font=("Sans", 8), selectbackground=INPUT, activestyle="none")
+        self.queue_summary.pack(side="left", fill="both", expand=True)
+        
+        # Processing Log
+        tk.Label(right, text="Processing Log", bg=BG, fg=TEXT, font=("Sans", 9, "bold")).pack(anchor="w", pady=(0, 5))
         status_frame = tk.Frame(right, bg=BG)
         status_frame.pack(fill="both", expand=True)
         self.status_log = tk.Text(status_frame, bg=INPUT, fg=TEXT, bd=0, relief="flat",
@@ -564,7 +619,7 @@ class App:
         s_batch = tk.Scrollbar(status_frame, orient="vertical", command=self.status_log.yview,
                                width=30, bg=CARD, troughcolor=BG, bd=0, highlightthickness=0,
                                activebackground=HOVER, elementborderwidth=0)
-        s_batch.pack(side="right", fill="y")
+        s_batch.pack(side="right", fill="y", padx=(5, 0))
         self.status_log.configure(yscrollcommand=s_batch.set)
     # ---------------- EDITOR TAB ----------------
     def build_editor(self):
@@ -573,6 +628,11 @@ class App:
         btn_load = self.btn(tool, "Load Folder", BLUE, self.load_editor_folder)
         btn_load.pack(side="left")
         ToolTip(btn_load, self.tooltips.get("load_editor"))
+        
+        btn_q = self.btn(tool, "Add to Batch Queue", BLUE, self.add_current_folder_to_batch)
+        btn_q.pack(side="left", padx=(10, 0))
+        ToolTip(btn_q, "Add currently loaded folder to Batch Queue")
+
         self.editor_folder_label = tk.Label(tool, text="No folder loaded", bg=BG, fg=DIM, font=("Sans", 8))
         self.editor_folder_label.pack(side="left", padx=15)
 
@@ -719,7 +779,9 @@ class App:
                 self.crop_out.set(str(Path(path) / "cropped_humans"))
 
     def start_crop(self):
-        if not YOLO:
+        try:
+            from ultralytics import YOLO
+        except ImportError:
             messagebox.showerror("Error", "Ultralytics (YOLO) not installed. Please run 'pip install ultralytics'.")
             return
         
@@ -746,7 +808,7 @@ class App:
         else:
             try:
                 target = int(res_str.replace("px", ""))
-            except:
+            except Exception:
                 target = "AUTO"
 
         self.btn_start_crop.config(state="disabled", bg=CARD, text="Processing...")
@@ -813,7 +875,7 @@ class App:
         s_filter = tk.Scrollbar(log_frame, orient="vertical", command=self.filter_log.yview,
                                 width=30, bg=CARD, troughcolor=BG, bd=0, highlightthickness=0,
                                 activebackground=HOVER, elementborderwidth=0)
-        s_filter.pack(side="right", fill="y")
+        s_filter.pack(side="right", fill="y", padx=(5, 0))
         self.filter_log.configure(yscrollcommand=s_filter.set)
     def move_keyword_pairs(self):
         src = Path(self.filter_src_var.get())
@@ -914,8 +976,10 @@ class App:
         txt_path = img_path.with_suffix(".txt")
         initial_content = ""
         if txt_path.exists():
-            try: initial_content = txt_path.read_text(encoding="utf-8", errors="ignore")
-            except: pass
+            try:
+                initial_content = txt_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                pass
             
         text_area = tk.Text(right_container, bg=INPUT, fg=TEXT, bd=0, relief="flat",
                             highlightthickness=0, font=("Sans", 10), wrap="word", insertbackground=BLUE)
@@ -955,7 +1019,8 @@ class App:
                     img_label.image = ph
                     # Allow img container to widen
                     img_container.config(width=target_size + 20)
-                except: pass
+                except Exception:
+                    pass
                 
             else:
                 # COLLAPSE
@@ -977,19 +1042,97 @@ class App:
                         img_label.configure(image=ph)
                         img_label.image = ph
                     img_container.config(width=img_col_width)
-                except: pass
+                except Exception:
+                    pass
 
         btn_expand.config(command=_toggle_expand)
 
         def _save(event=None):
             content = text_area.get("1.0", "end-1c")
-            try: txt_path.write_text(content, encoding="utf-8")
-            except: pass
+            try:
+                txt_path.write_text(content, encoding="utf-8")
+            except Exception:
+                pass
             
         text_area.bind("<KeyRelease>", _save)
         
         self.editor_items.append((img_path, item_frame))
         return img_label
+    
+    # ---------------- MISSING METHODS ----------------
+    def load_editor_images(self, filter_text=None):
+        """Reset and start lazy loading process."""
+        for widget in self.img_list_frame.winfo_children():
+            widget.destroy()
+        self.editor_items = []
+        
+        # Reset lazy load state
+        self.all_filtered_paths = []
+        self.loaded_count = 0
+        self.is_loading_more = False
+        
+        if not self.current_editor_folder: return
+        
+        # Start worker to find/filter paths
+        threading.Thread(target=self._find_paths_worker, args=(filter_text,), daemon=True).start()
+
+    def _find_paths_worker(self, filter_text):
+        """Background thread to find and filter paths."""
+        paths = []
+        # Support both case patterns
+        exts = ["*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp", "*.PNG", "*.JPG", "*.JPEG", "*.WEBP", "*.BMP"]
+        for ext in exts:
+            paths.extend(self.current_editor_folder.glob(ext))
+        
+        # Unique paths sorted
+        paths = sorted(list(set(paths)))
+        
+        if filter_text:
+            filtered = []
+            for p in paths:
+                # Try image.txt
+                txt = p.with_suffix(".txt")
+                if not txt.exists():
+                    # Try image.ext.txt
+                    txt = Path(str(p) + ".txt")
+                
+                if txt.exists():
+                    try:
+                        content = txt.read_text(encoding="utf-8", errors="ignore").lower()
+                        if filter_text.lower() in content:
+                            filtered.append(p)
+                    except Exception:
+                        pass
+            paths = filtered
+            
+        self.root.after(0, lambda: self._init_lazy_list(paths))
+
+    def _init_lazy_list(self, paths):
+        """Initialize list on main thread."""
+        self.all_filtered_paths = paths
+        self.load_more_items()
+
+    def load_more_items(self):
+        """Load next batch of items."""
+        if self.is_loading_more or self.loaded_count >= len(self.all_filtered_paths):
+            return
+            
+        self.is_loading_more = True
+        batch_size = 10 # Smaller batch for better responsiveness
+        end = min(self.loaded_count + batch_size, len(self.all_filtered_paths))
+        batch_paths = self.all_filtered_paths[self.loaded_count:end]
+        
+        # Create placeholders immediately
+        img_labels = []
+        for p in batch_paths:
+            lbl = self.create_editor_item(p, None) # Placeholder
+            img_labels.append((p, lbl))
+            
+        self.loaded_count = end
+        
+        # Start background thread to load thumbnails for this batch
+        threading.Thread(target=self._load_thumbnails_batch, args=(img_labels,), daemon=True).start()
+
     def _load_thumbnails_batch(self, items):
         """Load thumbnails for a batch and update UI."""
         for path, lbl in items:
@@ -1003,16 +1146,34 @@ class App:
                     img.thumbnail((self.thumb_size, self.thumb_size), Image.LANCZOS)
                     thumb = img
                     self.thumb_cache[str(path)] = thumb
-                except: pass
+                except Exception:
+                    pass
             
             if thumb:
                 # Update UI on main thread
-                self.root.after(0, lambda l=lbl, t=thumb: self._update_thumb(l, t))
+                self.root.after(0, lambda label=lbl, t=thumb: self._update_thumb(label, t))
             
             # Tiny sleep to keep UI responsive during heavy processing
             # import time; time.sleep(0.005) 
         
         self.is_loading_more = False
+
+    def _update_thumb(self, label, thumb_img):
+        try:
+            photo = ImageTk.PhotoImage(thumb_img)
+            label.configure(image=photo, text="")
+            label.image = photo
+        except Exception:
+            pass
+
+    def apply_editor_filter(self):
+        filter_text = self.editor_filter_var.get().strip()
+        self.load_editor_images(filter_text)
+
+    def clear_editor_filter(self):
+        self.editor_filter_var.set("")
+        self.load_editor_images()
+    
     def show_zoom(self, img_path: Path):
         if hasattr(self, "zoom_tl"):
             self.zoom_tl.destroy()
@@ -1035,6 +1196,7 @@ class App:
         close.pack(pady=4)
         close.bind("<Button-1>", lambda e: tl.destroy())
         self.zoom_tl = tl
+
     # ---------------- SERVER  ----------------
     def detect_binary(self):
         paths = ["./build/bin/llama-server", "./llama-server", "../llama.cpp/build/bin/llama-server"]
@@ -1045,19 +1207,22 @@ class App:
             if Path(p).exists():
                 self.bin.set(p)
                 break
+
     def update_vram_info(self):
         try:
             cmd = ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"]
             output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode().strip()
-            if not output: raise ValueError("Empty output")
+            if not output:
+                raise ValueError("Empty output")
             used, total = map(int, output.split(","))
             free, percent = total - used, (used / total) * 100
             color = GREEN if percent < 50 else (BLUE if percent < 80 else RED)
             self.vram_label.config(text=f"VRAM: {used}MB used / {free}MB free / {total}MB total ({percent:.0f}%)", fg=color)
-        except Exception as e:
-            self.vram_label.config(text=f"VRAM info unavailable", fg=DIM)
+        except Exception:
+            self.vram_label.config(text="VRAM info unavailable", fg=DIM)
         # Schedule next update
         self.root.after(5000, self.update_vram_info)
+
     def kill_gpu_processes(self):
         if not messagebox.askyesno("Kill GPU Processes", "Terminate ALL GPU processes?"):
             return
@@ -1070,12 +1235,13 @@ class App:
                 try:
                     os.kill(pid, signal.SIGTERM)
                     killed += 1
-                except:
+                except Exception:
                     pass
             threading.Timer(1.0, self.update_vram_info).start()
             messagebox.showinfo("GPU Processes", f"Killed {killed} process(es).")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to kill GPU processes:\n{e}")
+
     # ---------------------------------------------------------
     #  Cross-platform folder picker
     # ---------------------------------------------------------
@@ -1218,7 +1384,8 @@ class App:
             
             if result.returncode == 0:
                 path = result.stdout.strip()
-                if path: return path
+                if path:
+                    return path
             return ""
             
         except (FileNotFoundError, subprocess.CalledProcessError):
@@ -1296,19 +1463,45 @@ class App:
     def add_folder(self):
         path = Path(self._folder_picker("Select folder"))
         if path and path.is_dir():
-            item = QueueItem(self.queue_scroll.content, path, self.remove_item, self.config)
-            item.pack(fill="x", pady=(0, 6))
-            self.queue.append(item)
+            self._add_path_to_queue(path)
+
+    def add_current_folder_to_batch(self):
+        if self.current_editor_folder and self.current_editor_folder.is_dir():
+            self._add_path_to_queue(self.current_editor_folder)
+            messagebox.showinfo("Batch Queue", f"Added '{self.current_editor_folder.name}' to Batch Queue.")
+        else:
+            messagebox.showwarning("Batch Queue", "No folder currently loaded in editor.")
+
+    def _add_path_to_queue(self, path: Path):
+        item = QueueItem(self.queue_scroll.content, path, self.remove_item, self.update_queue_summary, self.config)
+        item.pack(fill="x", pady=(0, 6), padx=4)
+        self.queue.append(item)
+
+    def start_batch_if_needed(self):
+        if not self.batch_running:
+            self.toggle_batch()
+
+    def update_queue_summary(self):
+        self.queue_summary.delete(0, "end")
+        for item in self.queue:
+            if item.status == "processing":
+                self.queue_summary.insert("end", f"▶ {item.folder_path.name}")
+            elif item.status == "pending":
+                self.queue_summary.insert("end", f"• {item.folder_path.name}")
+
     def remove_item(self, item):
         if item.status != "processing":
             item.destroy()
             if item in self.queue:
                 self.queue.remove(item)
+            self.update_queue_summary()
+
     def log_status(self, msg):
         self.status_log.config(state="normal")
         self.status_log.insert("end", f"{msg}\n")
         self.status_log.see("end")
         self.status_log.config(state="disabled")
+
     def toggle_batch(self):
         if self.batch_running:
             self.batch_running = False
@@ -1316,6 +1509,7 @@ class App:
             self.prog_lbl.config(text="Stopping...")
         else:
             try:
+                from openai import OpenAI
                 self.client = OpenAI(base_url=API_URL, api_key="sk-no-key")
                 self.client.models.list()
             except Exception as e:
@@ -1327,40 +1521,65 @@ class App:
             self.batch_running = True
             self.btn_proc.config(text="Stop Processing", bg=RED)
             threading.Thread(target=self.run_batch, daemon=True).start()
+
     def run_batch(self):
-        total = len(self.queue)
-        if total == 0:
-            self.batch_running = False
-            self.root.after(0, lambda: self.btn_proc.config(text="Start Processing", bg=BLUE))
-            self.root.after(0, lambda: self.prog_lbl.config(text="No folders in queue"))
-            return
-            
         self.root.after(0, lambda: self.prog_lbl.config(text="Processing..."))
         
-        for idx, item in enumerate(self.queue):
-            if not self.batch_running:
+        while self.batch_running:
+            # 1. Find next pending item
+            item = None
+            queue_snapshot = list(self.queue)
+            for i in queue_snapshot:
+                if i.status == "pending":
+                    item = i
+                    break
+            
+            if not item:
+                # No pending items. 
                 break
+
+            # CRITICAL: Mark as processing immediately in worker thread to prevent re-selection
+            # if the UI update is delayed.
+            item.status = "processing"
+
+            # 2. Process item
             self.root.after(0, lambda i=item: i.set_status("processing", "Scanning..."))
+            
+            # --- Processing Logic (Reuse) ---
             imgs = []
-            for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp"):
-                imgs.extend(sorted(Path(item.folder_path).glob(ext)))
+            try:
+                for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp"):
+                    imgs.extend(sorted(Path(item.folder_path).glob(ext)))
+            except Exception:
+                self.root.after(0, lambda i=item: i.set_status("error", "Access Error"))
+                continue
+
             total_imgs = len(imgs)
             done = 0
+            
+            # Progress calculation basis:
+            # We treat each folder as a unit.
+            # But "Global Progress" is hard with dynamic queue.
+            # We will show progress of CURRENT folder on the progress bar?
+            # Or (Completed Folders / Total Queue)?
+            # Let's use (Completed Folders / Total Queue) + (Current Folder % / Total Queue)
+            
             for img in imgs:
                 if not self.batch_running:
                     break
+                
                 txt = img.with_suffix(".txt")
-                if txt.exists() and not self.overwrite.get():
+                if txt.exists() and not item.overwrite_var.get():
                     done += 1
                     continue
+                
                 try:
-                    #  ➜➜➜  USE THE PROMPT WRITTEN IN THE GUI FOR THIS FOLDER  ➜➜➜
                     prompt = item.get_prompt() or DEFAULT_PROMPT
                     b64 = base64.b64encode(img.read_bytes()).decode()
                     
                     try:
                         m_tokens = int(self.max_tokens.get())
-                    except:
+                    except Exception:
                         m_tokens = 1024
                         
                     resp = self.client.chat.completions.create(
@@ -1380,127 +1599,43 @@ class App:
                 except Exception as e:
                     err_msg = str(e)
                     if "exceed_context_size_error" in err_msg or "context size" in err_msg:
-                        err_msg = f"CONTEXT ERROR: Server context too small ({self.ctx.get()}). Try increasing 'Context' in Server tab and restart server."
+                        err_msg = f"CONTEXT ERROR: Server context too small ({self.ctx.get()}). Try increasing 'Context'."
                     self.root.after(0, lambda name=img.name, err=err_msg: self.log_status(f"✗ {name}: {err}"))
-                pct = int(((idx + (done / total_imgs)) / total) * 100) if total_imgs > 0 else 0
-                self.root.after(0, lambda p=pct: self.progress.configure(value=p))
+                
+                # Update Progress
+                # Re-calculate total queue size every time in case user added stuff
+                current_queue = list(self.queue)
+                q_len = len(current_queue)
+                if q_len > 0:
+                    # Count how many are done/error (processed)
+                    # This is tricky because "done" items persist.
+                    # We can iterate to find our index or just count "done" items
+                    processed_count = 0
+                    for q_item in current_queue:
+                        if q_item == item:
+                            break
+                        if q_item.status in ["done", "error"]:
+                            processed_count += 1
+                    
+                    # Add current item progress
+                    item_pct = (done / total_imgs) if total_imgs > 0 else 0
+                    total_pct = ((processed_count + item_pct) / q_len) * 100
+                    self.root.after(0, lambda p=total_pct: self.progress.configure(value=p))
+                
                 self.root.after(0, lambda d=done, t=total_imgs, i=item:
                                i.set_status("processing", f"{d}/{t}"))
-            self.root.after(0, lambda i=item, r=self.batch_running:
-                           i.set_status("done" if r else "error", "Complete" if r else "Stopped"))
+            
+            # Folder finished
+            status = "done" if self.batch_running else "error"
+            msg = "Complete" if self.batch_running else "Stopped"
+            self.root.after(0, lambda i=item, s=status, m=msg: i.set_status(s, m))
+            
+            if not self.batch_running:
+                break
+        
         self.batch_running = False
         self.root.after(0, lambda: self.btn_proc.config(text="Start Processing", bg=BLUE))
         self.root.after(0, lambda: self.prog_lbl.config(text="Idle"))
-    # ---------------- MISSING METHODS ----------------
-    def load_editor_images(self, filter_text=None):
-        """Reset and start lazy loading process."""
-        for widget in self.img_list_frame.winfo_children():
-            widget.destroy()
-        self.editor_items = []
-        
-        # Reset lazy load state
-        self.all_filtered_paths = []
-        self.loaded_count = 0
-        self.is_loading_more = False
-        
-        if not self.current_editor_folder: return
-        
-        # Start worker to find/filter paths
-        threading.Thread(target=self._find_paths_worker, args=(filter_text,), daemon=True).start()
-
-    def _find_paths_worker(self, filter_text):
-        """Background thread to find and filter paths."""
-        paths = []
-        # Support both case patterns
-        exts = ["*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp", "*.PNG", "*.JPG", "*.JPEG", "*.WEBP", "*.BMP"]
-        for ext in exts:
-            paths.extend(self.current_editor_folder.glob(ext))
-        
-        # Unique paths sorted
-        paths = sorted(list(set(paths)))
-        
-        if filter_text:
-            filtered = []
-            for p in paths:
-                # Try image.txt
-                txt = p.with_suffix(".txt")
-                if not txt.exists():
-                    # Try image.ext.txt
-                    txt = Path(str(p) + ".txt")
-                
-                if txt.exists():
-                    try:
-                        content = txt.read_text(encoding="utf-8", errors="ignore").lower()
-                        if filter_text.lower() in content:
-                            filtered.append(p)
-                    except: pass
-            paths = filtered
-            
-        self.root.after(0, lambda: self._init_lazy_list(paths))
-
-    def _init_lazy_list(self, paths):
-        """Initialize list on main thread."""
-        self.all_filtered_paths = paths
-        self.load_more_items()
-
-    def load_more_items(self):
-        """Load next batch of items."""
-        if self.is_loading_more or self.loaded_count >= len(self.all_filtered_paths):
-            return
-            
-        self.is_loading_more = True
-        batch_size = 20
-        end = min(self.loaded_count + batch_size, len(self.all_filtered_paths))
-        batch_paths = self.all_filtered_paths[self.loaded_count:end]
-        
-        # Create placeholders immediately
-        img_labels = []
-        for p in batch_paths:
-            lbl = self.create_editor_item(p, None) # Placeholder
-            img_labels.append((p, lbl))
-            
-        self.loaded_count = end
-        
-        # Start background thread to load thumbnails for this batch
-        threading.Thread(target=self._load_thumbnails_batch, args=(img_labels,), daemon=True).start()
-
-    def _load_thumbnails_batch(self, items):
-        """Load thumbnails for a batch and update UI."""
-        for path, lbl in items:
-            # Check cache
-            thumb = self.thumb_cache.get(str(path))
-            if not thumb:
-                try:
-                    img = Image.open(path)
-                    img.thumbnail((self.thumb_size, self.thumb_size))
-                    thumb = img
-                    self.thumb_cache[str(path)] = thumb
-                except: pass
-            
-            if thumb:
-                # Update UI on main thread
-                self.root.after(0, lambda l=lbl, t=thumb: self._update_thumb(l, t))
-            
-            # Tiny sleep to keep UI responsive during heavy processing
-            # import time; time.sleep(0.005) 
-        
-        self.is_loading_more = False
-
-    def _update_thumb(self, label, thumb_img):
-        try:
-            photo = ImageTk.PhotoImage(thumb_img)
-            label.configure(image=photo, text="")
-            label.image = photo
-        except: pass
-
-    def apply_editor_filter(self):
-        filter_text = self.editor_filter_var.get().strip()
-        self.load_editor_images(filter_text)
-
-    def clear_editor_filter(self):
-        self.editor_filter_var.set("")
-        self.load_editor_images()
-    
     
     def field(self, parent, label, var, browse, kind="folder"):
         """Create a modern input field with optional browse button."""
@@ -1514,12 +1649,17 @@ class App:
         # Add hover effects to entry
         entry.bind("<Enter>", lambda e: entry.config(bg=HOVER))
         entry.bind("<Leave>", lambda e: entry.config(bg=INPUT))
-        if browse:
+        def _set_file():
+            var.set(self._file_picker(f"Select {label if label else 'file'}"))
+        def _set_folder():
             is_server = "model" in str(var) or "projector" in str(var) or "binary" in str(var)
+            var.set(self._folder_picker(f"Select {label if label else 'folder'}", is_server=is_server))
+
+        if browse:
             if kind == "file":
-                cmd = lambda: var.set(self._file_picker(f"Select {label if label else 'file'}"))
+                cmd = _set_file
             else:
-                cmd = lambda: var.set(self._folder_picker(f"Select {label if label else 'folder'}", is_server=is_server))
+                cmd = _set_folder
 
             browse_btn = tk.Button(row, text="…", bg=CARD, fg=TEXT, bd=0, relief="flat",
                                   highlightthickness=0, width=4, font=("Sans", 10, "bold"),
