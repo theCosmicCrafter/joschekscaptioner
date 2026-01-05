@@ -2272,7 +2272,21 @@ class App:
         if self.server_proc:
             try:
                 if os.name != "nt":
-                    os.killpg(os.getpgid(self.server_proc.pid), signal.SIGTERM)
+                    # Check if process is still running
+                    if self.server_proc.poll() is None:
+                        try:
+                            pgid = os.getpgid(self.server_proc.pid)
+                            if pgid == os.getpgrp():
+                                # Safety: don't kill our own group
+                                self.log.insert(
+                                    "end",
+                                    "Warning: Server in same process group. Terminating process only.\n",
+                                )
+                                self.server_proc.terminate()
+                            else:
+                                os.killpg(pgid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
                 else:
                     self.server_proc.terminate()
                 threading.Thread(target=self.server_proc.wait, daemon=True).start()
@@ -2560,11 +2574,21 @@ class App:
         # Terminate server process properly
         if self.server_proc:
             try:
-                if os.name != "nt":
-                    os.killpg(os.getpgid(self.server_proc.pid), signal.SIGKILL)
-                else:
-                    self.server_proc.kill()
-                self.server_proc.wait(timeout=2)
+                # Only attempt cleanup if still running
+                if self.server_proc.poll() is None:
+                    if os.name != "nt":
+                        try:
+                            pgid = os.getpgid(self.server_proc.pid)
+                            if pgid == os.getpgrp():
+                                # Safety: don't kill our own group
+                                self.server_proc.kill()
+                            else:
+                                os.killpg(pgid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    else:
+                        self.server_proc.kill()
+                    self.server_proc.wait(timeout=2)
             except Exception as e:
                 print(f"Server cleanup error: {e}")
             finally:
