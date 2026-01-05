@@ -10,3 +10,4 @@ venv/
 .cursor/
 .pt
 *.zip
+create_release.py
