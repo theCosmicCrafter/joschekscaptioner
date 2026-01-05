@@ -24,9 +24,17 @@ You need Python 3.10+ and an NVIDIA GPU.
 
     **Linux/Mac:**
     ```bash
-    python3 -m venv venv
-    source venv/bin/activate
-    pip install -r requirements.txt
+    brew install python3@3.14 python-tk@3.14  # managed python has no tk
+    uv sync --no-managed-python --python 3.14 # using our uv.lock
+    ```
+
+    OR convert to `uv` yourself
+
+    ```bash
+    brew install python3@3.14 python-tk@3.14
+    uv init --no-managed-python --python 3.14
+    uv add $(cat requirements.txt)
+    uv lock
     ```
 
     **Windows:**
@@ -47,7 +55,7 @@ You need `llama-server` from [llama.cpp](https://github.com/ggerganov/llama.cpp)
 1. **Get the binary**: Put `llama-server` (or `.exe`) in root or `./build/bin/`.
 2. **Get a model**:
    - Recommended: [Qwen3-VL-8B-Abliterated-Caption-it](https://huggingface.co/prithivMLmods/Qwen3-VL-8B-Abliterated-Caption-it). If you are planning on captioning naughty stuff.
-   - Alternative: Qwen VL 3 - standart. better sometimes.
+   - Alternative: Qwen VL 3 - standard. better sometimes.
    - Don't forget the mmproj file.
 
 ## Usage
@@ -62,6 +70,11 @@ python joschekscaptions.py
 ```powershell
 .\venv\Scripts\activate
 python joschekscaptions.py
+```
+
+**MacOS**
+```bash
+uv run joschekscaptions.py
 ```
 
 1. **Server Tab**: Pick your binary and model. Hit start. There's a "Kill GPU processes" button for when things go south.
