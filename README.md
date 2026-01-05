@@ -7,7 +7,7 @@
 ## Features
 - **Model Selector**: Because we all know your file organization is a mess. Point it to wherever you hid your vision models this time.
 - **Batch Captioning**: Queue up folders to caption while you go contemplate what you are doing.
-- **Cropping**: Uses YOLOv8 to find people and crop them. It sometimes works.
+- **Cropping**: cropping with the same advanced vision model used for captioning. can be prompted to crop to any image content. and includes advanced options for sizing. tested only with qwen 3 vl 
 - **Caption Editor**: A groundbreaking text box to fix the AI's hallucinations. With filter function.
 - **Problem Bin**: One-click functionality to yeet problematic pairs into a separate folder so you can deal with them "later" (never).
 
@@ -67,7 +67,7 @@ python joschekscaptions.py
 1. **Server Tab**: Pick your binary and model. Hit start. There's a "Kill GPU processes" button for when things go south.
 2. **Batch Tab**: Point it at images. Wait.
 3. **Editor Tab**: Fix the captions.
-4. **Crop Humans**: Automagical cropping.
+4. **Automatic Cropping**: Advanced detection and cropping with strict multiple-of-256 enforcement and IoU-based deduplication.
 
 ## License
 GPL
