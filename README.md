@@ -2,85 +2,44 @@
 
 ![Batch Captioning](batch2.jpg)
 
- vibe coded image dataset caption tool, that does exactly what i personally need. If it works for you, that's a happy accident.
+ vibe coded image dataset caption tool, that does exactly what i personally need. If it works for you, that's a happy accident. now includes advanced cropping features.
 
 ## Features
-- **Model Selector**: Because we all know your file organization is a mess. Point it to wherever you hid your vision models this time.
+- **Server**: Because we all know your file organization is a mess. Point it to wherever you hid your vision models this time.
 - **Batch Captioning**: Queue up folders to caption while you go contemplate what you are doing.
-- **Cropping**: cropping with the same advanced vision model used for captioning. can be prompted to crop to any image content. and includes advanced options for sizing. tested only with qwen 3 vl 
+- **Cropping**: Advanced auto cropping with the same vision model used for captioning. Can be prompted to crop to any image content and includes advanced options for sizing. Tested only with qwen 3 vl. 
 - **Caption Editor**: A groundbreaking text box to fix the AI's hallucinations. With filter function.
 - **Problem Bin**: One-click functionality to yeet problematic pairs into a separate folder so you can deal with them "later" (never).
 
-## Installation
+## Installation & Usage
 
-You need Python 3.10+ and an NVIDIA GPU.
+1. **Prepare Binaries**: Download [llama-server](https://github.com/ggerganov/llama.cpp/releases) and a Vision Model: 
+The following models are recommended: [Qwen3-VL-8B-Abliterated-Caption-it](https://huggingface.co/prithivMLmods/Qwen3-VL-8B-Abliterated-Caption-it) (for naughty stuff) or [Qwen3-VL-8B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF) (standart for autocropping). *Don't forget the corresponding mmproj file.*
 
-### From Zipped Release (Recommended for most)
+2. **Setup & Run (Select your system):**
 
-1.  **Extract:** Unzip the downloaded archive to a folder.
-2.  **Install Python:** Ensure you have Python 3.10+ installed.
-3.  **Setup Environment:**
-    Open a terminal in the folder and run:
-
-    **Linux/Mac:**
-    ```bash
-    brew install python3@3.14 python-tk@3.14  # managed python has no tk
-    uv sync --no-managed-python --python 3.14 # using our uv.lock
-    ```
-
-    OR convert to `uv` yourself
-
-    ```bash
-    brew install python3@3.14 python-tk@3.14
-    uv init --no-managed-python --python 3.14
-    uv add $(cat requirements.txt)
-    uv lock
-    ```
-
-    **Windows:**
-    ```powershell
-    python -m venv venv
-    .\venv\Scripts\activate
-    pip install -r requirements.txt
-    ```
-
-4.  **Dependencies:** Ensure `python-tk` (Linux) or `zenity` (optional but recommended for better file dialogs on Linux) are installed.
-5.  **Imagemagick (Optional):** Necessary if you want to use the "Pre-process with Imagemagick" option in Automatic Cropping.
-    - **Linux**: `sudo apt install imagemagick`
-    - **macOS**: `brew install imagemagick`
-    - **Windows**: Download from [imagemagick.org](https://imagemagick.org/script/download.php)
-
-### Setup llama-server
-You need `llama-server` from [llama.cpp](https://github.com/ggerganov/llama.cpp)
-1. **Get the binary**: Put `llama-server` (or `.exe`) in root or `./build/bin/`.
-2. **Get a model**:
-   - Recommended: [Qwen3-VL-8B-Abliterated-Caption-it](https://huggingface.co/prithivMLmods/Qwen3-VL-8B-Abliterated-Caption-it). If you are planning on captioning naughty stuff.
-   - Alternative: Qwen VL 3 - standard. better sometimes.
-   - Don't forget the mmproj file.
-
-## Usage
-
-**Linux:**
+### Arch Linux
 ```bash
-source venv/bin/activate
-python joschekscaptions.py
+sudo pacman -S uv python-tk imagemagick zenity && uv run joschekscaptions.py
 ```
 
-**Windows:**
+### Debian / Ubuntu
+```bash
+sudo apt update && sudo apt install -y python3-tk curl imagemagick zenity && curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env && uv run joschekscaptions.py
+```
+
+### macOS
+```bash
+brew install uv python-tk imagemagick && uv run joschekscaptions.py
+```
+
+### Windows (PowerShell)
 ```powershell
-.\venv\Scripts\activate
-python joschekscaptions.py
-```
+# Optional: Install ImageMagick via winget if needed for cropping preprocessing
+# winget install ImageMagick.ImageMagick
 
-**MacOS**
-```bash
-uv run joschekscaptions.py
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"; $env:Path += ";$env:USERPROFILE\.local\bin"; uv run joschekscaptions.py
 ```
-
-1. **Server Tab**: Pick your binary and model. Hit start. There's a "Kill GPU processes" button for when things go south.
-2. **Batch Tab**: Point it at images. Wait.
-3. **Editor Tab**: Fix the captions.
-4. **Automatic Cropping**: Advanced detection and cropping with strict multiple-of-256 enforcement and IoU-based deduplication.
 
 ## License
 GPL
