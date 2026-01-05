@@ -1309,9 +1309,9 @@ class App:
         )
         prep_row = tk.Frame(f, bg=BG)
         prep_row.pack(fill="x", pady=(0, 10))
-        tk.Checkbutton(
+        cb_rem_pad = tk.Checkbutton(
             prep_row,
-            text="Pre-process (mogrify)",
+            text="Remove Padding",
             variable=self.crop_mogrify,
             bg=BG,
             fg=TEXT,
@@ -1319,7 +1319,12 @@ class App:
             activebackground=BG,
             font=("Sans", 8),
             highlightthickness=0,
-        ).pack(side="left", padx=(0, 15))
+        )
+        cb_rem_pad.pack(side="left", padx=(0, 15))
+        ToolTip(
+            cb_rem_pad,
+            "Uses ImageMagick's mogrify to trim empty space from original image before processing. Requires ImageMagick installed.",
+        )
         cb_sq = tk.Checkbutton(
             prep_row,
             text="Force Square (1:1)",
@@ -1571,10 +1576,8 @@ class App:
         path = self._folder_picker("Select Input Folder")
         if path:
             self.crop_in.set(path)
-            (
-                not self.crop_out.get()
-                and self.crop_out.set(str(Path(path) / "cropped_humans"))
-            )
+            if not self.crop_out.get():
+                self.crop_out.set(str(Path(path) / "crop"))
 
     def start_crop(self):
         input_path = self.crop_in.get()
