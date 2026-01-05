@@ -37,6 +37,10 @@ You need Python 3.10+ and an NVIDIA GPU.
     ```
 
 4.  **Dependencies:** Ensure `python-tk` (Linux) or `zenity` (optional but recommended for better file dialogs on Linux) are installed.
+5.  **Imagemagick (Optional):** Necessary if you want to use the "Pre-process with Imagemagick" option in Automatic Cropping.
+    - **Linux**: `sudo apt install imagemagick`
+    - **macOS**: `brew install imagemagick`
+    - **Windows**: Download from [imagemagick.org](https://imagemagick.org/script/download.php)
 
 ### Setup llama-server
 You need `llama-server` from [llama.cpp](https://github.com/ggerganov/llama.cpp)

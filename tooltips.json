@@ -20,6 +20,10 @@
   "filter_move": "Execute the move operation for all pairs containing the keyword.",
   "crop_in": "Folder containing images to be automatically cropped.",
   "crop_out": "Folder where the cropped human-centric images will be saved.",
-  "crop_res": "Target resolution for the longest side of the crop.",
+  "crop_conform": "Snap the longest side to a multiple of 256. Prefer snapping UP. Snaps DOWN only if within 10% of lower multiple or if image is too small.",
+  "crop_margin": "Extra padding added to the detected box before snapping (in percent of object size).",
+  "crop_min_side": "The resulting crop's longest side will be at least this many pixels.",
+  "crop_square": "Forces the crop into a 1:1 aspect ratio. The shorter side will be expanded to match the longest side, within image boundaries. Will attempt to reach Min Side even for small source images.",
+  "crop_one_per": "When multiple objects are detected in an image, save only the largest (best) crop per image instead of all detections.",
   "start_crop": "Start the AI-powered human detection and cropping process."
 }
